@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mechmanager-execution
+  labels:
+    app: mechmanager-execution
+    environment: dev

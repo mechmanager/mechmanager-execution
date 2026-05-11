@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mechmanager-execution-api
+  namespace: mechmanager-execution
+  labels:
+    app: mechmanager-execution
+    component: api
+
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mechmanager-execution
+      component: api
+
+  template:
+    metadata:
+      labels:
+        app: mechmanager-execution
+        component: api
+    spec:
+      imagePullSecrets:
+        - name: ghcr-cred
+
+      containers:
+        - name: api
+          image: ghcr.io/mechmanager-execution/mechmanager-execution:{{IMAGE_TAG}}
+          imagePullPolicy: Always
+
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: mechmanager-execution-config
+            - secretRef:
+                name: mechmanager-execution-secrets
+
+          env:
+            - name: DATABASE_DSN
+              value: "host=$(DB_HOST) port=$(DB_PORT) user=$(DB_USER) password=$(DB_PASS) dbname=$(DB_NAME) sslmode=disable"
+
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+
+      restartPolicy: Always

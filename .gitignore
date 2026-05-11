@@ -1,0 +1,12 @@
+.env
+*.out
+coverage.out
+/src/app
+/src/docs/
+k8s/*.rendered.yaml
+
+# Terraform
+terraform/.terraform/
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/*.tfvars

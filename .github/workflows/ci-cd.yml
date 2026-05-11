@@ -1,0 +1,204 @@
+name: CI/CD - MechManager - Execution
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch:
+
+env:
+  GO_VERSION: "1.25.2"
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/mechmanager-execution
+  NAMESPACE: mechmanager-execution
+  AWS_REGION: us-east-1
+  CLUSTER_NAME: mechmanager-execution
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  ci:
+    name: CI - Build, Test, Docker Build/Push
+    runs-on: ubuntu-latest
+
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event_name == 'pull_request') ||
+      ((github.event_name == 'push') && (github.ref == 'refs/heads/main'))
+
+    permissions:
+      contents: read
+      packages: write
+
+    outputs:
+      image_tag: ${{ steps.tag.outputs.value }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Static analysis
+        run: |
+          test -z "$(gofmt -l .)"
+          go vet ./...
+        working-directory: ./src
+
+      - name: Run tests
+        run: go test -v ./...
+        working-directory: ./src
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Generate image tag (short SHA)
+        id: tag
+        run: echo "value=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
+      - name: Build & Push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./src
+          file: ./src/docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }}
+            ${{ env.IMAGE_NAME }}:latest
+
+  cd:
+    name: CD - Deploy to Kubernetes (EKS)
+    needs: ci
+    runs-on: ubuntu-latest
+
+    if: >
+      (github.event_name == 'workflow_dispatch') ||
+      ((github.event_name == 'push') && (github.ref == 'refs/heads/main'))
+
+    outputs:
+      lb_hostname: ${{ steps.deploy.outputs.lb_hostname }}
+      lb_url: ${{ steps.deploy.outputs.lb_url }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install awscli and kubectl
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y curl jq unzip
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+          unzip -q /tmp/awscliv2.zip -d /tmp
+          sudo /tmp/aws/install -i /usr/local/aws-cli -b /usr/local/bin || true
+          KUBECTL_VERSION=$(curl -L -s https://dl.k8s.io/release/stable.txt)
+          curl -LO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
+      - name: Setup kubeconfig for EKS
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
+          kubectl get nodes --no-headers -o wide
+
+      - name: Ensure namespace exists
+        run: kubectl apply -f k8s/namespace.yaml
+
+      - name: Ensure GHCR pull secret
+        env:
+          NS: ${{ env.NAMESPACE }}
+        run: |
+          set -euo pipefail
+          kubectl delete secret ghcr-cred -n $NS --ignore-not-found
+          kubectl create secret docker-registry ghcr-cred \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GHCR_PAT }}" \
+            --docker-email="ci@github.com" \
+            -n $NS
+          kubectl patch serviceaccount default -n $NS \
+            -p '{"imagePullSecrets":[{"name":"ghcr-cred"}]}' || true
+
+      - name: Render and apply deployment
+        env:
+          TAG: ${{ needs.ci.outputs.image_tag }}
+          NS: ${{ env.NAMESPACE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TAG:-}" ]; then echo "TAG is empty; aborting" && exit 1; fi
+
+          RENDERED="k8s/deployment.rendered.yaml"
+          cp k8s/deployment.yaml "$RENDERED"
+          sed -i "s/{{IMAGE_TAG}}/${TAG}/g" "$RENDERED"
+
+          if grep -q "{{IMAGE_TAG}}" "$RENDERED"; then
+            echo "Placeholder {{IMAGE_TAG}} ainda presente; abortando"
+            exit 1
+          fi
+
+          kubectl apply -f "$RENDERED" -n "$NS"
+          kubectl apply -f k8s/service.yaml -n "$NS" || true
+          kubectl apply -f k8s/configmap.yaml -n "$NS" || true
+          kubectl apply -f k8s/hpa.yaml -n "$NS" || true
+          kubectl apply -f k8s/secrets.yaml -n "$NS" || true
+
+      - name: Rollout status and smoke test
+        id: deploy
+        env:
+          TAG: ${{ needs.ci.outputs.image_tag }}
+          IMAGE: ${{ env.IMAGE_NAME }}
+          NS: ${{ env.NAMESPACE }}
+          SERVICE_LB: mechmanager-execution-api-lb
+          PORT: 8080
+        run: |
+          set -euo pipefail
+
+          kubectl -n "$NS" set image deployment/mechmanager-execution-api api="$IMAGE:$TAG" --record || true
+
+          if ! kubectl -n "$NS" rollout status deployment/mechmanager-execution-api --timeout=180s; then
+            kubectl -n "$NS" rollout undo deployment/mechmanager-execution-api || true
+            echo "lb_hostname=" >> $GITHUB_OUTPUT
+            echo "lb_url=" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          HOSTNAME=""
+          for i in $(seq 1 60); do
+            HOSTNAME=$(kubectl get svc "$SERVICE_LB" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
+            if [ -n "$HOSTNAME" ]; then break; fi
+            echo "Aguardando LoadBalancer hostname... ($i/60)"
+            sleep 5
+          done
+
+          echo "lb_hostname=$HOSTNAME" >> $GITHUB_OUTPUT
+          echo "lb_url=http://$HOSTNAME:$PORT/health" >> $GITHUB_OUTPUT
+
+          if [ -n "$HOSTNAME" ]; then
+            for attempt in $(seq 1 5); do
+              HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://$HOSTNAME:$PORT/health" || echo "000")
+              if [ "$HTTP_CODE" = "200" ]; then echo "Smoke test OK"; exit 0; fi
+              sleep $((attempt * 3))
+            done
+            kubectl -n "$NS" rollout undo deployment/mechmanager-execution-api || true
+            exit 1
+          fi
