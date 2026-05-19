@@ -10,10 +10,10 @@ on:
 env:
   GO_VERSION: "1.25.2"
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/mechmanager-os
-  NAMESPACE: mechmanager-os
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/mechmanager-execution
+  NAMESPACE: mechmanager-execution
   AWS_REGION: us-east-1
-  CLUSTER_NAME: mechmanager-os
+  CLUSTER_NAME: mechmanager-execution
 
 permissions:
   contents: read
@@ -71,7 +71,7 @@ jobs:
         with:
           args: >
             -X
-            -Dsonar.projectKey=mechmanager-os
+            -Dsonar.projectKey=mechmanager-execution
             -Dsonar.organization=mechmanager
             -Dsonar.sources=src/adapter/service
             -Dsonar.tests=src/adapter/service
@@ -189,7 +189,7 @@ jobs:
           TAG: ${{ needs.ci.outputs.image_tag }}
           IMAGE: ${{ env.IMAGE_NAME }}
           NS: ${{ env.NAMESPACE }}
-          SERVICE_LB: mechmanager-os-api-lb
+          SERVICE_LB: mechmanager-execution-api-lb
           PORT: 8080
         run: |
           set -euo pipefail
@@ -198,14 +198,14 @@ jobs:
             echo "=== DEBUG ==="
             kubectl -n "$NS" get svc "$SERVICE_LB" -o wide || true
             kubectl -n "$NS" describe svc "$SERVICE_LB" || true
-            kubectl -n "$NS" get pods -l app=mechmanager-os,component=api -o wide || true
+            kubectl -n "$NS" get pods -l app=mechmanager-execution,component=api -o wide || true
             kubectl -n "$NS" get events --sort-by='.lastTimestamp' | tail -n 50 || true
             echo "=== END DEBUG ==="
           }
 
           # ensure deployment exists before attempting set image
-          if ! kubectl -n "$NS" get deployment mechmanager-os-api >/dev/null 2>&1; then
-            echo "Deployment mechmanager-os-api not found in namespace $NS; aborting set image step"
+          if ! kubectl -n "$NS" get deployment mechmanager-execution-api >/dev/null 2>&1; then
+            echo "Deployment mechmanager-execution-api not found in namespace $NS; aborting set image step"
             log_debug
             echo "lb_hostname=" >> $GITHUB_OUTPUT
             echo "lb_url=" >> $GITHUB_OUTPUT
@@ -213,16 +213,16 @@ jobs:
           fi
 
           # apply image update (this is safe even if deployment was applied above)
-          kubectl -n "$NS" set image deployment/mechmanager-os-api api="$IMAGE:$TAG" --record || true
+          kubectl -n "$NS" set image deployment/mechmanager-execution-api api="$IMAGE:$TAG" --record || true
 
           # rollout with retries
-          if ! kubectl -n "$NS" rollout status deployment/mechmanager-os-api --timeout=180s; then
+          if ! kubectl -n "$NS" rollout status deployment/mechmanager-execution-api --timeout=180s; then
             echo "Rollout failed or timed out"
-            kubectl -n "$NS" rollout restart deployment/mechmanager-os-api || true
-            if ! kubectl -n "$NS" rollout status deployment/mechmanager-os-api --timeout=180s; then
+            kubectl -n "$NS" rollout restart deployment/mechmanager-execution-api || true
+            if ! kubectl -n "$NS" rollout status deployment/mechmanager-execution-api --timeout=180s; then
               echo "Rollout still failing after restart"
               log_debug
-              kubectl -n "$NS" rollout undo deployment/mechmanager-os-api || true
+              kubectl -n "$NS" rollout undo deployment/mechmanager-execution-api || true
               echo "lb_hostname=" >> $GITHUB_OUTPUT
               echo "lb_url=" >> $GITHUB_OUTPUT
               exit 1
@@ -245,7 +245,7 @@ jobs:
             echo "LoadBalancer hostname did not appear in time"
             log_debug
             echo "Running internal smoke test as fallback"
-            kubectl run --rm -i --tty smoke-curl --image=radial/busyboxplus:curl -n "$NS" -- /bin/sh -c "curl -sS -o /dev/stdout -w '\nHTTP %{http_code}\n' --max-time 10 http://mechmanager-os-api:8080/health" || true
+            kubectl run --rm -i --tty smoke-curl --image=radial/busyboxplus:curl -n "$NS" -- /bin/sh -c "curl -sS -o /dev/stdout -w '\nHTTP %{http_code}\n' --max-time 10 http://mechmanager-execution-api:8080/health" || true
             echo "lb_hostname=" >> $GITHUB_OUTPUT
             echo "lb_url=" >> $GITHUB_OUTPUT
             exit 1
@@ -281,12 +281,12 @@ jobs:
 
           echo "Smoke test against LoadBalancer failed after $MAX_ATTEMPTS attempts"
           echo "Running internal smoke test to distinguish infra vs app"
-          kubectl run --rm -i --tty smoke-curl --image=radial/busyboxplus:curl -n "$NS" -- /bin/sh -c "curl -sS -o /dev/stdout -w '\nHTTP %{http_code}\n' --max-time 10 http://mechmanager-os-api:8080/health" || true
+          kubectl run --rm -i --tty smoke-curl --image=radial/busyboxplus:curl -n "$NS" -- /bin/sh -c "curl -sS -o /dev/stdout -w '\nHTTP %{http_code}\n' --max-time 10 http://mechmanager-execution-api:8080/health" || true
 
           echo "Collecting debug info"
           log_debug
 
           echo "Rolling back deployment"
-          kubectl -n "$NS" rollout undo deployment/mechmanager-os-api || true
+          kubectl -n "$NS" rollout undo deployment/mechmanager-execution-api || true
 
           exit 1

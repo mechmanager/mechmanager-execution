@@ -5,8 +5,8 @@ on:
 
 env:
   AWS_REGION: us-east-1
-  CLUSTER_NAME: mechmanager-os
-  NAMESPACE: mechmanager-os
+  CLUSTER_NAME: mechmanager-execution
+  NAMESPACE: mechmanager-execution
 
 jobs:
   update-config:
@@ -36,5 +36,5 @@ jobs:
 
       - name: Reiniciar Deployment para aplicar configs
         run: |
-          kubectl rollout restart deployment/mechmanager-os-api -n $NAMESPACE
-          kubectl rollout status deployment/mechmanager-os-api -n $NAMESPACE --timeout=180s
+          kubectl rollout restart deployment/mechmanager-execution-api -n $NAMESPACE
+          kubectl rollout status deployment/mechmanager-execution-api -n $NAMESPACE --timeout=180s
