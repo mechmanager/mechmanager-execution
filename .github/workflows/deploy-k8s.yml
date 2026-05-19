@@ -53,21 +53,21 @@ jobs:
       - name: Esperar cluster EKS ativo
         run: |
           set -euo pipefail
-          CLUSTER_NAME="mechmanager-os"
+          CLUSTER_NAME="mechmanager-execution"
           echo "Waiting for cluster ${CLUSTER_NAME} to become ACTIVE..."
           aws eks wait cluster-active --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
 
       - name: Configurar kubectl
         run: |
           set -euo pipefail
-          CLUSTER_NAME="mechmanager-os"
+          CLUSTER_NAME="mechmanager-execution"
           aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}"
           kubectl config current-context
 
       - name: Esperar node group ativo
         run: |
           set -euo pipefail
-          CLUSTER_NAME="mechmanager-os"
+          CLUSTER_NAME="mechmanager-execution"
           NODEGROUP_NAME="${CLUSTER_NAME}-ng"
           echo "Waiting for nodegroup ${NODEGROUP_NAME} to become ACTIVE..."
           aws eks wait nodegroup-active --cluster-name "${CLUSTER_NAME}" --nodegroup-name "${NODEGROUP_NAME}" --region "${AWS_REGION}"
@@ -76,10 +76,10 @@ jobs:
       - name: Criar namespace (idempotente)
         run: |
           set -euo pipefail
-          kubectl create namespace mechmanager-os || true
+          kubectl create namespace mechmanager-execution || true
 
       - name: Aplicar manifests
         run: |
           set -euo pipefail
           kubectl apply -f k8s/namespace.yaml
-          kubectl apply -f k8s/configmap.yaml -n mechmanager-os
+          kubectl apply -f k8s/configmap.yaml -n mechmanager-execution
