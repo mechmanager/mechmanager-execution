@@ -1,0 +1,85 @@
+name: Provisionar e Configurar EKS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  eks-setup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    env:
+      AWS_REGION: us-east-1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configurar credenciais AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Instalar Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.7.0
+
+      # Init no diretório raiz
+      - name: Terraform Init (root)
+        run: terraform init -input=false -upgrade
+        working-directory: terraform
+
+      # Init no módulo k8s
+      - name: Terraform Init (k8s)
+        run: terraform init -input=false -upgrade
+        working-directory: terraform/k8s
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: terraform/k8s
+
+      - name: Terraform Plan
+        run: terraform plan -out=tfplan
+        working-directory: terraform/k8s
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve tfplan
+        working-directory: terraform/k8s
+
+      - name: Esperar cluster EKS ativo
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME="mechmanager-os"
+          echo "Waiting for cluster ${CLUSTER_NAME} to become ACTIVE..."
+          aws eks wait cluster-active --name "${CLUSTER_NAME}" --region "${AWS_REGION}"
+
+      - name: Configurar kubectl
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME="mechmanager-os"
+          aws eks update-kubeconfig --region "${AWS_REGION}" --name "${CLUSTER_NAME}"
+          kubectl config current-context
+
+      - name: Esperar node group ativo
+        run: |
+          set -euo pipefail
+          CLUSTER_NAME="mechmanager-os"
+          NODEGROUP_NAME="${CLUSTER_NAME}-ng"
+          echo "Waiting for nodegroup ${NODEGROUP_NAME} to become ACTIVE..."
+          aws eks wait nodegroup-active --cluster-name "${CLUSTER_NAME}" --nodegroup-name "${NODEGROUP_NAME}" --region "${AWS_REGION}"
+          kubectl wait --for=condition=Ready nodes --all --timeout=15m
+
+      - name: Criar namespace (idempotente)
+        run: |
+          set -euo pipefail
+          kubectl create namespace mechmanager-os || true
+
+      - name: Aplicar manifests
+        run: |
+          set -euo pipefail
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/configmap.yaml -n mechmanager-os
