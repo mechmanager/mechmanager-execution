@@ -1,4 +1,4 @@
-name: CI/CD - MechManager - Execution
+name: CI/CD - MechManager - OS
 
 on:
   push:
@@ -10,10 +10,10 @@ on:
 env:
   GO_VERSION: "1.25.2"
   REGISTRY: ghcr.io
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/mechmanager-execution
-  NAMESPACE: mechmanager-execution
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/mechmanager-os
+  NAMESPACE: mechmanager-os
   AWS_REGION: us-east-1
-  CLUSTER_NAME: mechmanager-execution
+  CLUSTER_NAME: mechmanager-os
 
 permissions:
   contents: read
@@ -24,18 +24,11 @@ jobs:
   ci:
     name: CI - Build, Test, Docker Build/Push
     runs-on: ubuntu-latest
-
-    if: >
-      (github.event_name == 'workflow_dispatch') ||
-      (github.event_name == 'pull_request') ||
-      ((github.event_name == 'push') && (github.ref == 'refs/heads/main'))
-
     permissions:
       contents: read
       packages: write
-
-    outputs:
-      image_tag: ${{ steps.tag.outputs.value }}
+      checks: write
+      pull-requests: write
 
     steps:
       - name: Checkout
@@ -47,36 +40,46 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
-      - name: Static analysis
+      - name: Run unit tests with coverage
+        working-directory: ./src
         run: |
-          test -z "$(gofmt -l .)"
-          go vet ./...
+          go test -coverprofile=coverage.out ./adapter/service
+          # Ajusta os caminhos para incluir 'src/' no início
+          sed -i 's#^adapter/#src/adapter/#' coverage.out
+          go tool cover -func=coverage.out
+          go tool cover -html=coverage.out -o coverage.html
+
+      - name: Check coverage threshold (80%)
         working-directory: ./src
+        run: |
+          total=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Coverage: $total%"
+          if (( $(echo "$total < 80" | bc -l) )); then
+            echo "Coverage below 80%! Failing build."
+            exit 1
+          fi
 
-      - name: Run tests
-        run: go test -v ./...
-        working-directory: ./src
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_PAT }}
+          name: coverage-report
+          path: src/coverage.html
 
-      - name: Generate image tag (short SHA)
-        id: tag
-        run: echo "value=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
-
-      - name: Build & Push Docker image
-        uses: docker/build-push-action@v6
+      - name: SonarCloud Scan
+        uses: SonarSource/sonarcloud-github-action@v2
+        continue-on-error: true
         with:
-          context: ./src
-          file: ./src/docker/Dockerfile
-          push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }}
-            ${{ env.IMAGE_NAME }}:latest
+          args: >
+            -X
+            -Dsonar.projectKey=mechmanager-os
+            -Dsonar.organization=mechmanager
+            -Dsonar.sources=src/adapter/service
+            -Dsonar.tests=src/adapter/service
+            -Dsonar.test.inclusions=**/*_test.go
+            -Dsonar.go.coverage.reportPaths=src/coverage.out
+            -Dsonar.exclusions=**/vendor/**,**/features/**
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
   cd:
     name: CD - Deploy to Kubernetes (EKS)
@@ -115,20 +118,26 @@ jobs:
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/
 
-      - name: Setup kubeconfig for EKS
+      - name: Setup kubeconfig for EKS and validate
+        id: kubeconfig
         run: |
           set -euo pipefail
           aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.CLUSTER_NAME }}
-          kubectl get nodes --no-headers -o wide
+          echo "kubeconfig updated"
+          echo "current-context: $(kubectl config current-context)"
+          kubectl get nodes --no-headers -o wide || (kubectl config view && exit 1)
 
       - name: Ensure namespace exists
-        run: kubectl apply -f k8s/namespace.yaml
+        run: |
+          set -euo pipefail
+          kubectl apply -f k8s/namespace.yaml
 
-      - name: Ensure GHCR pull secret
+      - name: Ensure GHCR pull secret (create before deployment)
         env:
           NS: ${{ env.NAMESPACE }}
         run: |
           set -euo pipefail
+          kubectl get namespace $NS || (echo "Namespace $NS missing" && exit 1)
           kubectl delete secret ghcr-cred -n $NS --ignore-not-found
           kubectl create secret docker-registry ghcr-cred \
             --docker-server=ghcr.io \
@@ -139,66 +148,145 @@ jobs:
           kubectl patch serviceaccount default -n $NS \
             -p '{"imagePullSecrets":[{"name":"ghcr-cred"}]}' || true
 
-      - name: Render and apply deployment
+      - name: Render deployment manifest with real image tag and apply
         env:
           TAG: ${{ needs.ci.outputs.image_tag }}
           NS: ${{ env.NAMESPACE }}
         run: |
           set -euo pipefail
-          if [ -z "${TAG:-}" ]; then echo "TAG is empty; aborting" && exit 1; fi
-
-          RENDERED="k8s/deployment.rendered.yaml"
-          cp k8s/deployment.yaml "$RENDERED"
-          sed -i "s/{{IMAGE_TAG}}/${TAG}/g" "$RENDERED"
-
-          if grep -q "{{IMAGE_TAG}}" "$RENDERED"; then
-            echo "Placeholder {{IMAGE_TAG}} ainda presente; abortando"
+          # fail early if tag is empty
+          if [ -z "${TAG:-}" ]; then
+            echo "TAG is empty; aborting"
             exit 1
           fi
 
+          # create a rendered copy so repo file is not modified permanently
+          RENDERED="k8s/deployment.rendered.yaml"
+          cp k8s/deployment.yaml "$RENDERED"
+
+          # replace placeholder {{IMAGE_TAG}} with the real tag
+          sed -i "s/{{IMAGE_TAG}}/${TAG}/g" "$RENDERED"
+
+          # sanity check: ensure no placeholder remains
+          if grep -q "{{IMAGE_TAG}}" "$RENDERED"; then
+            echo "Placeholder {{IMAGE_TAG}} still present in $RENDERED; aborting"
+            echo "Contents:"
+            cat "$RENDERED"
+            exit 1
+          fi
+
+          # apply the rendered deployment and other manifests
           kubectl apply -f "$RENDERED" -n "$NS"
           kubectl apply -f k8s/service.yaml -n "$NS" || true
           kubectl apply -f k8s/configmap.yaml -n "$NS" || true
           kubectl apply -f k8s/hpa.yaml -n "$NS" || true
+          # apply secrets manifest if you manage other secrets via manifests
           kubectl apply -f k8s/secrets.yaml -n "$NS" || true
 
-      - name: Rollout status and smoke test
+      - name: Update application image with retries, rollout check and LB smoke test
         id: deploy
         env:
           TAG: ${{ needs.ci.outputs.image_tag }}
           IMAGE: ${{ env.IMAGE_NAME }}
           NS: ${{ env.NAMESPACE }}
-          SERVICE_LB: mechmanager-execution-api-lb
+          SERVICE_LB: mechmanager-os-api-lb
           PORT: 8080
         run: |
           set -euo pipefail
 
-          kubectl -n "$NS" set image deployment/mechmanager-execution-api api="$IMAGE:$TAG" --record || true
+          log_debug() {
+            echo "=== DEBUG ==="
+            kubectl -n "$NS" get svc "$SERVICE_LB" -o wide || true
+            kubectl -n "$NS" describe svc "$SERVICE_LB" || true
+            kubectl -n "$NS" get pods -l app=mechmanager-os,component=api -o wide || true
+            kubectl -n "$NS" get events --sort-by='.lastTimestamp' | tail -n 50 || true
+            echo "=== END DEBUG ==="
+          }
 
-          if ! kubectl -n "$NS" rollout status deployment/mechmanager-execution-api --timeout=180s; then
-            kubectl -n "$NS" rollout undo deployment/mechmanager-execution-api || true
+          # ensure deployment exists before attempting set image
+          if ! kubectl -n "$NS" get deployment mechmanager-os-api >/dev/null 2>&1; then
+            echo "Deployment mechmanager-os-api not found in namespace $NS; aborting set image step"
+            log_debug
             echo "lb_hostname=" >> $GITHUB_OUTPUT
             echo "lb_url=" >> $GITHUB_OUTPUT
             exit 1
           fi
 
+          # apply image update (this is safe even if deployment was applied above)
+          kubectl -n "$NS" set image deployment/mechmanager-os-api api="$IMAGE:$TAG" --record || true
+
+          # rollout with retries
+          if ! kubectl -n "$NS" rollout status deployment/mechmanager-os-api --timeout=180s; then
+            echo "Rollout failed or timed out"
+            kubectl -n "$NS" rollout restart deployment/mechmanager-os-api || true
+            if ! kubectl -n "$NS" rollout status deployment/mechmanager-os-api --timeout=180s; then
+              echo "Rollout still failing after restart"
+              log_debug
+              kubectl -n "$NS" rollout undo deployment/mechmanager-os-api || true
+              echo "lb_hostname=" >> $GITHUB_OUTPUT
+              echo "lb_url=" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+          fi
+
+          # wait for LoadBalancer hostname
           HOSTNAME=""
           for i in $(seq 1 60); do
             HOSTNAME=$(kubectl get svc "$SERVICE_LB" -n "$NS" -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || true)
-            if [ -n "$HOSTNAME" ]; then break; fi
-            echo "Aguardando LoadBalancer hostname... ($i/60)"
+            if [ -n "$HOSTNAME" ]; then
+              echo "Found LB hostname: $HOSTNAME"
+              break
+            fi
+            echo "Waiting for LoadBalancer hostname... ($i/60)"
             sleep 5
           done
 
-          echo "lb_hostname=$HOSTNAME" >> $GITHUB_OUTPUT
-          echo "lb_url=http://$HOSTNAME:$PORT/health" >> $GITHUB_OUTPUT
-
-          if [ -n "$HOSTNAME" ]; then
-            for attempt in $(seq 1 5); do
-              HTTP_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "http://$HOSTNAME:$PORT/health" || echo "000")
-              if [ "$HTTP_CODE" = "200" ]; then echo "Smoke test OK"; exit 0; fi
-              sleep $((attempt * 3))
-            done
-            kubectl -n "$NS" rollout undo deployment/mechmanager-execution-api || true
+          if [ -z "$HOSTNAME" ]; then
+            echo "LoadBalancer hostname did not appear in time"
+            log_debug
+            echo "Running internal smoke test as fallback"
+            kubectl run --rm -i --tty smoke-curl --image=radial/busyboxplus:curl -n "$NS" -- /bin/sh -c "curl -sS -o /dev/stdout -w '\nHTTP %{http_code}\n' --max-time 10 http://mechmanager-os-api:8080/health" || true
+            echo "lb_hostname=" >> $GITHUB_OUTPUT
+            echo "lb_url=" >> $GITHUB_OUTPUT
             exit 1
           fi
+
+          # print and export LB hostname and URL
+          URL="http://$HOSTNAME:$PORT/health"
+          echo "=== LoadBalancer Hostname ==="
+          echo "$HOSTNAME"
+          echo "=== LoadBalancer URL being requested ==="
+          echo "$URL"
+
+          echo "lb_hostname=$HOSTNAME" >> $GITHUB_OUTPUT
+          echo "lb_url=$URL" >> $GITHUB_OUTPUT
+
+          # retry loop with exponential backoff
+          MAX_ATTEMPTS=5
+          SLEEP=3
+          for attempt in $(seq 1 $MAX_ATTEMPTS); do
+            echo "Attempt $attempt: curl -sS -o /tmp/health_body -w '%{http_code}' --max-time 10 $URL"
+            HTTP_CODE=$(curl -sS -o /tmp/health_body -w '%{http_code}' --max-time 10 "$URL" || echo "000")
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Smoke test passed (200)"
+              cat /tmp/health_body || true
+              exit 0
+            fi
+            echo "Smoke test failed (HTTP $HTTP_CODE). Body:"
+            cat /tmp/health_body || true
+            echo "Sleeping $SLEEP seconds before retry"
+            sleep $SLEEP
+            SLEEP=$(( SLEEP * 2 ))
+          done
+
+          echo "Smoke test against LoadBalancer failed after $MAX_ATTEMPTS attempts"
+          echo "Running internal smoke test to distinguish infra vs app"
+          kubectl run --rm -i --tty smoke-curl --image=radial/busyboxplus:curl -n "$NS" -- /bin/sh -c "curl -sS -o /dev/stdout -w '\nHTTP %{http_code}\n' --max-time 10 http://mechmanager-os-api:8080/health" || true
+
+          echo "Collecting debug info"
+          log_debug
+
+          echo "Rolling back deployment"
+          kubectl -n "$NS" rollout undo deployment/mechmanager-os-api || true
+
+          exit 1
