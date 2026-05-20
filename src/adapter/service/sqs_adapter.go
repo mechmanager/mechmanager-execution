@@ -20,13 +20,19 @@ import (
 
 var _ portOut.MessageManager = (*SQSSender)(nil)
 
+type sqsClient interface {
+	SendMessage(ctx context.Context, input *sqs.SendMessageInput, opts ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
+	ReceiveMessage(ctx context.Context, input *sqs.ReceiveMessageInput, opts ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
+	DeleteMessage(ctx context.Context, input *sqs.DeleteMessageInput, opts ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
+}
+
 type SQSSender struct {
-	client           *sqs.Client
+	client           sqsClient
 	completeQueueURL string
 	nrApp            *newrelic.Application
 }
 
-func NewSQSSender(client *sqs.Client, nrApp *newrelic.Application) *SQSSender {
+func NewSQSSender(client sqsClient, nrApp *newrelic.Application) *SQSSender {
 	return &SQSSender{
 		client:           client,
 		completeQueueURL: os.Getenv("SQS_EXECUTION_COMPLETE_URL"),
