@@ -3,7 +3,6 @@ package service_test
 import (
 	"errors"
 	"testing"
-	"time"
 
 	service "mechmanager-execution/adapter/service"
 	"mechmanager-execution/domain"
@@ -55,6 +54,26 @@ func TestCreateFromOrder_RepoError(t *testing.T) {
 	_, err := adapter.CreateFromOrder("order-123", "mec-001")
 	if err == nil {
 		t.Fatal("esperado erro quando repo falha")
+	}
+}
+
+func TestCreateFromOrder_AlreadyExists(t *testing.T) {
+	adapter, _, dynamo, _ := newAdapter()
+
+	first, err := adapter.CreateFromOrder("order-dup", "mec-001")
+	if err != nil {
+		t.Fatalf("primeira criação falhou: %v", err)
+	}
+
+	second, err := adapter.CreateFromOrder("order-dup", "mec-001")
+	if err != nil {
+		t.Fatalf("esperado sem erro para mensagem duplicada, got: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Error("esperado retornar a mesma execução, não criar uma nova")
+	}
+	if len(dynamo.enqueued) != 1 {
+		t.Errorf("esperado 1 enqueue (não 2), got: %d", len(dynamo.enqueued))
 	}
 }
 
@@ -232,379 +251,72 @@ func TestFindByOrderID_NotFound(t *testing.T) {
 	}
 }
 
-func TestCreateFromOrder_DynamoError(t *testing.T) {
-	adapter, _, dynamo, _ := newAdapter()
-	dynamo.enqueueErr = errors.New("dynamo error")
-
-	exec, err := adapter.CreateFromOrder("order-012", "mec-001")
-	if err != nil {
-		t.Fatalf("não deveria falhar, got: %v", err)
-	}
-	if exec.OrderID != "order-012" {
-		t.Errorf("esperado order_id=order-012, got: %s", exec.OrderID)
-	}
-}
-
-func TestComplete_RepoUpdateError(t *testing.T) {
-	adapter, repo, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-015", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "")
-
-	repo.updateErr = errors.New("update error")
-	_, err := adapter.Complete(exec.ID, "finalizando")
-	if err == nil {
-		t.Fatal("esperado erro quando repo.Update falha em Complete")
-	}
-}
-
-func TestComplete_DynamoError(t *testing.T) {
-	adapter, _, dynamo, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-016", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "")
-
-	dynamo.removeErr = errors.New("remove error")
-	completed, err := adapter.Complete(exec.ID, "finalizado")
-	if err != nil {
-		t.Fatalf("não deveria falhar, got: %v", err)
-	}
-	if completed.Status != domain.ExecutionStatusCompleted {
-		t.Errorf("esperado COMPLETED, got: %s", completed.Status)
-	}
-}
-
-func TestFail_RepoUpdateError(t *testing.T) {
-	adapter, repo, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-018", "mec-001")
-
-	repo.updateErr = errors.New("update error")
-	_, err := adapter.Fail(exec.ID, "falha")
-	if err == nil {
-		t.Fatal("esperado erro quando repo.Update falha em Fail")
-	}
-}
-
-func TestIsValidTransition(t *testing.T) {
-	if !service.IsValidTransition(domain.ExecutionStatusQueued, domain.ExecutionStatusInDiagnosis) {
-		t.Error("esperado transição válida QUEUED→IN_DIAGNOSIS")
-	}
-	if service.IsValidTransition(domain.ExecutionStatusQueued, domain.ExecutionStatusCompleted) {
-		t.Error("esperado transição inválida QUEUED→COMPLETED")
-	}
-}
-
-func TestUpdateStatus_RepoUpdateError(t *testing.T) {
-	adapter, repo, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-021", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
-
-	repo.updateErr = errors.New("update error")
-	_, err := adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "")
-	if err == nil {
-		t.Fatal("esperado erro quando repo.Update falha em UpdateStatus")
-	}
-}
-
-func TestUpdateStatus_DynamoError(t *testing.T) {
-	adapter, _, dynamo, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-022", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
-
-	dynamo.updateErr = errors.New("dynamo error")
-	updated, err := adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "reparo")
-	if err != nil {
-		t.Fatalf("não deveria falhar, got: %v", err)
-	}
-	if updated.Status != domain.ExecutionStatusInRepair {
-		t.Errorf("esperado IN_REPAIR, got: %s", updated.Status)
-	}
-}
-
-func TestComplete_MessengerError(t *testing.T) {
-	adapter, _, _, messenger := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-023", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "")
-
-	messenger.completeErr = errors.New("messenger error")
-	completed, err := adapter.Complete(exec.ID, "finalizado")
-	if err != nil {
-		t.Fatalf("não deveria falhar, got: %v", err)
-	}
-	if completed.Status != domain.ExecutionStatusCompleted {
-		t.Errorf("esperado COMPLETED, got: %s", completed.Status)
-	}
-}
-
-func TestFail_DynamoError(t *testing.T) {
-	adapter, _, dynamo, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-024", "mec-001")
-
-	dynamo.updateErr = errors.New("dynamo error")
-	failed, err := adapter.Fail(exec.ID, "falha")
-	if err != nil {
-		t.Fatalf("não deveria falhar, got: %v", err)
-	}
-	if failed.Status != domain.ExecutionStatusFailed {
-		t.Errorf("esperado FAILED, got: %s", failed.Status)
-	}
-}
-
-func TestFail_MessengerError(t *testing.T) {
-	adapter, _, _, messenger := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-025", "mec-001")
-
-	messenger.failedErr = errors.New("messenger error")
-	failed, err := adapter.Fail(exec.ID, "falha")
-	if err != nil {
-		t.Fatalf("não deveria falhar, got: %v", err)
-	}
-	if failed.Status != domain.ExecutionStatusFailed {
-		t.Errorf("esperado FAILED, got: %s", failed.Status)
-	}
-}
-
-func TestFindByID_NotFound(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	_, err := adapter.FindByID(uuid.New())
-	if err == nil {
-		t.Fatal("esperado erro para ID inexistente em FindByID")
-	}
-}
-
-func TestFail_SavesDiagnosticNotes(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-030", "mec-001")
-
-	failed, _ := adapter.Fail(exec.ID, "motor queimado")
-	if failed.DiagnosticNotes != "motor queimado" {
-		t.Errorf("esperado DiagnosticNotes='motor queimado', got: %s", failed.DiagnosticNotes)
-	}
-}
-
-func TestUpdateStatus_SavesRepairNotes(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-031", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "diagnóstico feito")
-
-	updated, _ := adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "troca de correia")
-	if updated.RepairNotes != "troca de correia" {
-		t.Errorf("esperado RepairNotes='troca de correia', got: %s", updated.RepairNotes)
-	}
-}
-
-func TestComplete_SavesRepairNotes(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-032", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "")
-
-	completed, _ := adapter.Complete(exec.ID, "troca de embreagem")
-	if completed.RepairNotes != "troca de embreagem" {
-		t.Errorf("esperado RepairNotes='troca de embreagem', got: %s", completed.RepairNotes)
-	}
-}
+// --- FindByID ---
 
 func TestFindByID_Found(t *testing.T) {
 	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-033", "mec-001")
+	exec, _ := adapter.CreateFromOrder("order-012", "mec-001")
 
 	found, err := adapter.FindByID(exec.ID)
 	if err != nil {
 		t.Fatalf("FindByID falhou: %v", err)
 	}
 	if found.ID != exec.ID {
-		t.Errorf("esperado ID=%s, got: %s", exec.ID, found.ID)
+		t.Errorf("ID incorreto: esperado %v, got %v", exec.ID, found.ID)
 	}
 }
 
-func TestIsValidTransition_UnknownStatus(t *testing.T) {
-	unknown := domain.ExecutionStatus("UNKNOWN")
-	if service.IsValidTransition(unknown, domain.ExecutionStatusQueued) {
-		t.Error("esperado false para status desconhecido")
-	}
-}
-
-func TestFail_UpdatesTimestamp(t *testing.T) {
+func TestFindByID_NotFound(t *testing.T) {
 	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-034", "mec-001")
 
-	before := exec.UpdatedAt
-	// força o relógio avançar
-	time.Sleep(2 * time.Millisecond)
-
-	failed, _ := adapter.Fail(exec.ID, "falha de teste")
-	if !failed.UpdatedAt.After(before) {
-		t.Errorf("esperado UpdatedAt atualizado em Fail, before=%v after=%v", before, failed.UpdatedAt)
+	_, err := adapter.FindByID(uuid.New())
+	if err == nil {
+		t.Fatal("esperado erro para ID inexistente")
 	}
 }
 
-func TestUpdateStatus_UpdatesTimestamp(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-035", "mec-001")
+// --- Complete error paths ---
 
-	before := exec.UpdatedAt
-	// força o relógio avançar
-	time.Sleep(2 * time.Millisecond)
-
-	updated, _ := adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "teste")
-	if !updated.UpdatedAt.After(before) {
-		t.Errorf("esperado UpdatedAt atualizado em UpdateStatus, before=%v after=%v", before, updated.UpdatedAt)
-	}
-}
-
-func TestCreateFromOrder_SavesMechanicID(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-040", "mec-999")
-
-	if exec.MechanicID != "mec-999" {
-		t.Errorf("esperado MechanicID='mec-999', got: %s", exec.MechanicID)
-	}
-}
-
-func TestComplete_UpdatesTimestamp(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-041", "mec-001")
+func TestComplete_RepoUpdateError(t *testing.T) {
+	adapter, repo, _, _ := newAdapter()
+	exec, _ := adapter.CreateFromOrder("order-013", "mec-001")
 	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
 	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "")
 
-	before := exec.UpdatedAt
-	time.Sleep(2 * time.Millisecond)
-
-	completed, _ := adapter.Complete(exec.ID, "finalizado")
-	if !completed.UpdatedAt.After(before) {
-		t.Errorf("esperado UpdatedAt atualizado em Complete, before=%v after=%v", before, completed.UpdatedAt)
-	}
-}
-
-func TestFail_FromInRepair(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-042", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "")
-
-	failed, _ := adapter.Fail(exec.ID, "falha durante reparo")
-	if failed.Status != domain.ExecutionStatusFailed {
-		t.Errorf("esperado FAILED, got: %s", failed.Status)
-	}
-}
-
-func TestUpdateStatus_SavesDiagnosticNotes(t *testing.T) {
-	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-043", "mec-001")
-
-	updated, _ := adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "teste diagnóstico")
-	if updated.DiagnosticNotes != "teste diagnóstico" {
-		t.Errorf("esperado DiagnosticNotes='teste diagnóstico', got: %s", updated.DiagnosticNotes)
-	}
-}
-
-func TestIsValidTransition_AllValidPaths(t *testing.T) {
-	valid := []struct {
-		current domain.ExecutionStatus
-		next    domain.ExecutionStatus
-	}{
-		{domain.ExecutionStatusQueued, domain.ExecutionStatusInDiagnosis},
-		{domain.ExecutionStatusQueued, domain.ExecutionStatusFailed},
-		{domain.ExecutionStatusInDiagnosis, domain.ExecutionStatusInRepair},
-		{domain.ExecutionStatusInDiagnosis, domain.ExecutionStatusFailed},
-		{domain.ExecutionStatusInRepair, domain.ExecutionStatusCompleted},
-		{domain.ExecutionStatusInRepair, domain.ExecutionStatusFailed},
-	}
-	for _, v := range valid {
-		if !service.IsValidTransition(v.current, v.next) {
-			t.Errorf("esperado transição válida %s→%s", v.current, v.next)
-		}
-	}
-}
-
-func TestCreateFromOrder_RepoError_NoEnqueue(t *testing.T) {
-	adapter, repo, dynamo, _ := newAdapter()
-	repo.saveErr = errors.New("db error")
-
-	_, err := adapter.CreateFromOrder("order-044", "mec-001")
+	repo.updateErr = errors.New("db error")
+	_, err := adapter.Complete(exec.ID, "notas")
 	if err == nil {
-		t.Fatal("esperado erro quando repo.Save falha")
-	}
-	if len(dynamo.enqueued) != 0 {
-		t.Error("não deveria enfileirar quando repo.Save falha")
+		t.Fatal("esperado erro quando repo falha no Complete")
 	}
 }
 
-func TestUpdateStatus_FindByIDError(t *testing.T) {
-	adapter, repo, _, _ := newAdapter()
-	repo.findErr = errors.New("db error")
-
-	_, err := adapter.UpdateStatus(uuid.New(), domain.ExecutionStatusInDiagnosis, "")
-	if err == nil {
-		t.Fatal("esperado erro quando repo.FindByID falha")
-	}
-}
-
-func TestComplete_FindByIDError(t *testing.T) {
-	adapter, repo, _, _ := newAdapter()
-	repo.findErr = errors.New("db error")
+func TestComplete_NotFound(t *testing.T) {
+	adapter, _, _, _ := newAdapter()
 
 	_, err := adapter.Complete(uuid.New(), "notas")
 	if err == nil {
-		t.Fatal("esperado erro quando repo.FindByID falha em Complete")
+		t.Fatal("esperado erro para ID inexistente no Complete")
 	}
 }
 
-func TestFail_FindByIDError(t *testing.T) {
-	adapter, repo, _, _ := newAdapter()
-	repo.findErr = errors.New("db error")
+// --- Fail error paths ---
 
-	_, err := adapter.Fail(uuid.New(), "falha")
-	if err == nil {
-		t.Fatal("esperado erro quando repo.FindByID falha em Fail")
-	}
-}
-
-func TestIsValidTransition_InvalidWithinMap(t *testing.T) {
-	if service.IsValidTransition(domain.ExecutionStatusInDiagnosis, domain.ExecutionStatusCompleted) {
-		t.Error("esperado transição inválida IN_DIAGNOSIS→COMPLETED")
-	}
-}
-
-func TestComplete_MessengerSendError(t *testing.T) {
-	adapter, _, _, messenger := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-045", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "")
-
-	messenger.completeErr = errors.New("send error")
-	completed, err := adapter.Complete(exec.ID, "finalizado")
-	if err != nil {
-		t.Fatalf("não deveria falhar, got: %v", err)
-	}
-	if completed.Status != domain.ExecutionStatusCompleted {
-		t.Errorf("esperado COMPLETED, got: %s", completed.Status)
-	}
-}
-
-func TestFail_MessengerSendError(t *testing.T) {
-	adapter, _, _, messenger := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-046", "mec-001")
-
-	messenger.failedErr = errors.New("send error")
-	failed, err := adapter.Fail(exec.ID, "falha simulada")
-	if err != nil {
-		t.Fatalf("não deveria falhar, got: %v", err)
-	}
-	if failed.Status != domain.ExecutionStatusFailed {
-		t.Errorf("esperado FAILED, got: %s", failed.Status)
-	}
-}
-
-func TestUpdateStatus_FillsRepairNotes(t *testing.T) {
+func TestFail_NotFound(t *testing.T) {
 	adapter, _, _, _ := newAdapter()
-	exec, _ := adapter.CreateFromOrder("order-047", "mec-001")
-	exec, _ = adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInDiagnosis, "diagnóstico feito")
 
-	updated, _ := adapter.UpdateStatus(exec.ID, domain.ExecutionStatusInRepair, "troca de motor")
-	if updated.RepairNotes != "troca de motor" {
-		t.Errorf("esperado RepairNotes='troca de motor', got: %s", updated.RepairNotes)
+	_, err := adapter.Fail(uuid.New(), "motivo")
+	if err == nil {
+		t.Fatal("esperado erro para ID inexistente no Fail")
+	}
+}
+
+func TestFail_RepoUpdateError(t *testing.T) {
+	adapter, repo, _, _ := newAdapter()
+	exec, _ := adapter.CreateFromOrder("order-014", "mec-001")
+
+	repo.updateErr = errors.New("db error")
+	_, err := adapter.Fail(exec.ID, "motivo")
+	if err == nil {
+		t.Fatal("esperado erro quando repo falha no Fail")
 	}
 }

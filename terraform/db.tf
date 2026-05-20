@@ -1,88 +1,28 @@
-# -----------------------------------------------------------
-# PostgreSQL (RDS) — banco relacional (SQL)
-# Armazena o histórico completo de execuções com todas as
-# transições de status, notas de diagnóstico e reparo
-# -----------------------------------------------------------
-
-# VPC
-resource "aws_vpc" "execution_vpc" {
-  cidr_block           = "10.2.0.0/16"
-  enable_dns_support   = true
-  enable_dns_hostnames = true
-
-  tags = {
-    Name    = "execution-vpc"
-    Service = "mechmanager-execution"
-  }
+# VPC existente
+data "aws_vpc" "execution_vpc" {
+  id = "vpc-0ec0bef1e5e730f53"
 }
 
-# Subnets
-resource "aws_subnet" "execution_public_a" {
-  vpc_id                  = aws_vpc.execution_vpc.id
-  cidr_block              = "10.2.1.0/24"
-  availability_zone       = "us-east-1a"
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "execution-public-subnet-a"
-  }
+# Subnets existentes (exemplo: duas em AZs diferentes)
+data "aws_subnet" "db_a" {
+  id = "subnet-071b331ef4bb16031" # us-east-1d
 }
 
-resource "aws_subnet" "execution_public_b" {
-  vpc_id                  = aws_vpc.execution_vpc.id
-  cidr_block              = "10.2.2.0/24"
-  availability_zone       = "us-east-1b"
-  map_public_ip_on_launch = true
-
-  tags = {
-    Name = "execution-public-subnet-b"
-  }
+data "aws_subnet" "db_b" {
+  id = "subnet-0e6d0f3ea13ba4754" # us-east-1b
 }
 
-# Internet Gateway
-resource "aws_internet_gateway" "execution_gw" {
-  vpc_id = aws_vpc.execution_vpc.id
-
-  tags = {
-    Name = "execution-gw"
-  }
-}
-
-# Route Table
-resource "aws_route_table" "execution_public_rt" {
-  vpc_id = aws_vpc.execution_vpc.id
-
-  route {
-    cidr_block = "0.0.0.0/0"
-    gateway_id = aws_internet_gateway.execution_gw.id
-  }
-
-  tags = {
-    Name = "execution-public-rt"
-  }
-}
-
-resource "aws_route_table_association" "execution_a" {
-  subnet_id      = aws_subnet.execution_public_a.id
-  route_table_id = aws_route_table.execution_public_rt.id
-}
-
-resource "aws_route_table_association" "execution_b" {
-  subnet_id      = aws_subnet.execution_public_b.id
-  route_table_id = aws_route_table.execution_public_rt.id
-}
-
-# Security Group
+# Security Group do banco — tráfego aberto
 resource "aws_security_group" "execution_db_sg" {
   name        = "execution-db-sg"
   description = "Allow Postgres access"
-  vpc_id      = aws_vpc.execution_vpc.id
+  vpc_id      = data.aws_vpc.execution_vpc.id
 
   ingress {
     from_port   = 5432
     to_port     = 5432
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = ["0.0.0.0/0"] # aberto
   }
 
   egress {
@@ -97,10 +37,10 @@ resource "aws_security_group" "execution_db_sg" {
   }
 }
 
-# DB Subnet Group
+# DB Subnet Group usando subnets existentes
 resource "aws_db_subnet_group" "execution_db_subnet_group" {
   name       = "execution-db-subnet-group"
-  subnet_ids = [aws_subnet.execution_public_a.id, aws_subnet.execution_public_b.id]
+  subnet_ids = [data.aws_subnet.db_a.id, data.aws_subnet.db_b.id]
 
   tags = {
     Name = "execution-db-subnet-group"
@@ -110,7 +50,7 @@ resource "aws_db_subnet_group" "execution_db_subnet_group" {
 # Parameter Group
 resource "aws_db_parameter_group" "execution_postgres_params" {
   name        = "execution-postgres-params"
-  family      = "postgres18"
+  family      = "postgres18" # mantém como você definiu
   description = "Parameter group para mechmanager-execution"
 
   parameter {
