@@ -10,10 +10,24 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/google/uuid"
+	newrelic "github.com/newrelic/go-agent/v3/newrelic"
 
 	service "mechmanager-execution/adapter/service"
 	"mechmanager-execution/domain"
 )
+
+func newDisabledNRApp(t *testing.T) *newrelic.Application {
+	t.Helper()
+	app, err := newrelic.NewApplication(
+		newrelic.ConfigAppName("test-execution"),
+		newrelic.ConfigLicense("0123456789012345678901234567890123456789"),
+		newrelic.ConfigEnabled(false),
+	)
+	if err != nil {
+		t.Fatalf("failed to create NR app: %v", err)
+	}
+	return app
+}
 
 // mockSQSClient implements sqsClient interface
 type mockSQSClient struct {
@@ -78,6 +92,33 @@ func TestNewSQSSender_emptyEnvVar(t *testing.T) {
 	sender := service.NewSQSSender(nil, nil)
 	if sender == nil {
 		t.Fatal("expected non-nil sender")
+	}
+}
+
+// --- SendExecutionComplete with New Relic ---
+
+func TestSendExecutionComplete_WithNewRelic(t *testing.T) {
+	client := &mockSQSClient{}
+	nrApp := newDisabledNRApp(t)
+	sender := service.NewSQSSender(client, nrApp)
+
+	now := time.Now()
+	exec := newExecution("order-nr-1")
+	exec.RepairNotes = "ok"
+	exec.CompletedAt = &now
+
+	if err := sender.SendExecutionComplete(exec); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+}
+
+func TestSendExecutionFailed_WithNewRelic(t *testing.T) {
+	client := &mockSQSClient{}
+	nrApp := newDisabledNRApp(t)
+	sender := service.NewSQSSender(client, nrApp)
+
+	if err := sender.SendExecutionFailed(newExecution("order-nr-2"), "falha nr"); err != nil {
+		t.Fatalf("expected no error, got: %v", err)
 	}
 }
 
