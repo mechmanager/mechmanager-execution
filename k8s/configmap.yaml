@@ -9,7 +9,7 @@ data:
   PORT: "8080"
   GIN_MODE: "release"
 
-  DB_HOST: "execution-db.csrmunroi7us.us-east-1.rds.amazonaws.com"
+  DB_HOST: "execution-db-v1.cmxyowuec2v2.us-east-1.rds.amazonaws.com:5432"
   DB_PORT: "5432"
   DB_USER: meu_usuario
   DB_NAME: mechmanager_execution
@@ -20,10 +20,10 @@ data:
   DYNAMO_EXECUTION_TABLE: execution-queue
 
   # Fila SQS de entrada: OS Service publica aqui quando uma OS é aceita
-  SQS_EXECUTION_QUEUE_URL: https://sqs.us-east-1.amazonaws.com/975050103410/execution-queue
+  SQS_EXECUTION_QUEUE_URL: https://sqs.us-east-1.amazonaws.com/083186909287/execution-queue
 
   # Fila SQS de saída: este serviço publica quando a execução é concluída/falha
-  SQS_EXECUTION_COMPLETE_URL: https://sqs.us-east-1.amazonaws.com/975050103410/execution-complete
+  SQS_EXECUTION_COMPLETE_URL: https://sqs.us-east-1.amazonaws.com/083186909287/execution-complete
 
   CORS_ALLOW_ORIGINS: "http://localhost,http://localhost:3000"
 
