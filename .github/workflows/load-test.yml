@@ -1,0 +1,28 @@
+name: Manual Load Test (Stress)
+
+on:
+  workflow_dispatch: # Isso garante que só roda manualmente (botão no GitHub)
+
+env:
+  GO_VERSION: "1.25.2" # Mesma versão da sua CI principal
+
+jobs:
+  stress-test:
+    name: Run Load Test (1k Orders)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Run Load Test
+        # -tags=load: Ativa os arquivos com //go:build load
+        # -timeout 20m: Testes de carga demoram, aumentamos o timeout padrão (10m)
+        # Ajuste o caminho "./test/integration/load/..." se sua pasta for diferente
+        run: go test -v -tags=load -timeout 20m ./test/integration/load/...

@@ -70,7 +70,7 @@ func (a *ExecutionAdapter) UpdateStatus(id uuid.UUID, status domain.ExecutionSta
 	if err != nil {
 		return nil, err
 	}
-	if !isValidTransition(execution.Status, status) {
+	if !IsValidTransition(execution.Status, status) {
 		return nil, errors.New("transição de status inválida: " + string(execution.Status) + " → " + string(status))
 	}
 	execution.Status = status
@@ -144,8 +144,8 @@ func (a *ExecutionAdapter) Fail(id uuid.UUID, reason string) (*domain.Execution,
 	return updated, nil
 }
 
-// isValidTransition valida as transições de status do Saga
-func isValidTransition(current, next domain.ExecutionStatus) bool {
+// IsValidTransition valida as transições de status do Saga
+func IsValidTransition(current, next domain.ExecutionStatus) bool {
 	transitions := map[domain.ExecutionStatus][]domain.ExecutionStatus{
 		domain.ExecutionStatusQueued:      {domain.ExecutionStatusInDiagnosis, domain.ExecutionStatusFailed},
 		domain.ExecutionStatusInDiagnosis: {domain.ExecutionStatusInRepair, domain.ExecutionStatusFailed},
