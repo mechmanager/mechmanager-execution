@@ -98,6 +98,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set TAG
+        run: echo "TAG=${GITHUB_SHA}" >> $GITHUB_ENV
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
