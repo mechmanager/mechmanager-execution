@@ -18,21 +18,23 @@ import (
 	newrelic "github.com/newrelic/go-agent/v3/newrelic"
 )
 
-var _ portOut.MessageManager = (*SQSSender)(nil)
-
-type sqsClient interface {
+// SQSAPI é a interface exportada do cliente SQS, permitindo mock em testes.
+type SQSAPI interface {
 	SendMessage(ctx context.Context, input *sqs.SendMessageInput, opts ...func(*sqs.Options)) (*sqs.SendMessageOutput, error)
 	ReceiveMessage(ctx context.Context, input *sqs.ReceiveMessageInput, opts ...func(*sqs.Options)) (*sqs.ReceiveMessageOutput, error)
 	DeleteMessage(ctx context.Context, input *sqs.DeleteMessageInput, opts ...func(*sqs.Options)) (*sqs.DeleteMessageOutput, error)
 }
 
+var _ portOut.MessageManager = (*SQSSender)(nil)
+
 type SQSSender struct {
-	client           sqsClient
+	client           SQSAPI
 	completeQueueURL string
 	nrApp            *newrelic.Application
 }
 
-func NewSQSSender(client sqsClient, nrApp *newrelic.Application) *SQSSender {
+// NewSQSSender cria um SQSSender. nrApp é opcional (passa nil nos testes).
+func NewSQSSender(client SQSAPI, nrApp *newrelic.Application) *SQSSender {
 	return &SQSSender{
 		client:           client,
 		completeQueueURL: os.Getenv("SQS_EXECUTION_COMPLETE_URL"),

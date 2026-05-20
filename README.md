@@ -1,162 +1,269 @@
 # mechmanager-execution
 
-Microserviço responsável pelo gerenciamento da fila de execução de Ordens de Serviço (OS) da oficina mecânica. Faz parte do ecossistema **MechManager** — FIAP Tech Challenge.
+Microsserviço responsável pela fila de execução mecânica das Ordens de Serviço no ecossistema **MechManager**. Gerencia o ciclo de vida da execução — do diagnóstico à conclusão — e publica eventos de compensação via AWS SQS quando há falhas.
+
+> FIAP POS TECH — Tech Challenge · Arquitetura de Microsserviços
+
+---
 
 ## Responsabilidades
 
-- Consumir OS aceitas publicadas pelo **OS Service** via SQS
-- Gerenciar a fila de execução com estados progressivos (Saga Pattern)
-- Persistir o histórico completo no PostgreSQL
-- Manter o estado em tempo real no DynamoDB
-- Notificar o OS Service ao concluir ou falhar uma execução via SQS
+- Consumir a fila `execution-queue` (SQS) e criar execuções para cada OS aprovada
+- Gerenciar estados progressivos da execução mecânica
+- Persistir histórico completo no PostgreSQL
+- Manter estado em tempo real no DynamoDB
+- Publicar evento `EXECUTION_COMPLETED` ou `EXECUTION_FAILED` na fila `execution-complete`
+- Acionar Saga Rollback em caso de falha (notifica OS Service para liberar peças)
+
+---
 
 ## Arquitetura
 
-```
-OS Service ──SQS──► [execution-queue] ──► mechmanager-execution
-                                                  │
-                                    ┌─────────────┼─────────────┐
-                                    ▼             ▼             ▼
-                               PostgreSQL     DynamoDB     [execution-complete] ──SQS──► OS Service
-                            (histórico)   (fila em tempo real)
+### Hexagonal (Ports & Adapters)
+
+```mermaid
+graph LR
+    subgraph Entrada
+        SQS_IN["SQS Polling\nexecution-queue"]
+        HTTP["Controllers (Gin)\nPATCH /status\nPATCH /complete\nPATCH /fail"]
+    end
+
+    subgraph Core
+        UC["Use Cases\nExecutionAdapter"]
+        DOM["Domain\nExecution, ExecutionStatus"]
+    end
+
+    subgraph Saída
+        PG[("PostgreSQL :5433\nhistórico")]
+        DDB[("DynamoDB\nexecutions")]
+        SQS_OUT["SQS Publisher\nexecution-complete"]
+    end
+
+    SQS_IN --> UC
+    HTTP --> UC
+    UC --> DOM
+    UC --> PG
+    UC --> DDB
+    UC --> SQS_OUT
 ```
 
-### Padrões utilizados
+### Posição na Saga
 
-- **Arquitetura Hexagonal** (Ports & Adapters)
-- **Saga Pattern** — máquina de estados com evento de compensação em caso de falha
-- **DDD** — domínio isolado sem dependência de frameworks
+```mermaid
+sequenceDiagram
+    participant OS as mechmanager-os
+    participant SQS3 as SQS: execution-queue
+    participant Exec as mechmanager-execution
+    participant SQS4 as SQS: execution-complete
 
-### Máquina de estados (Saga)
-
+    OS->>SQS3: Publica {order_id, mechanic_id}
+    SQS3->>Exec: Consome mensagem
+    Exec->>Exec: Cria execução (QUEUED)
+    Note over Exec: Mecânico avança estados via API
+    Exec->>Exec: QUEUED → IN_DIAGNOSIS → IN_REPAIR
+    Exec->>SQS4: Publica EXECUTION_COMPLETED
+    SQS4->>OS: OS → OS_FINALIZADA
 ```
-QUEUED ──► IN_DIAGNOSIS ──► IN_REPAIR ──► COMPLETED
-   └──────────────┴──────────────┴──────► FAILED (rollback)
+
+### Máquina de Estados
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED : SQS execution-queue recebida\nexecução criada
+
+    QUEUED --> IN_DIAGNOSIS : PATCH /executions/:id/status\n{status: IN_DIAGNOSIS}
+    QUEUED --> FAILED : PATCH /executions/:id/fail
+
+    IN_DIAGNOSIS --> IN_REPAIR : PATCH /executions/:id/status\n{status: IN_REPAIR}
+    IN_DIAGNOSIS --> FAILED : PATCH /executions/:id/fail
+
+    IN_REPAIR --> COMPLETED : PATCH /executions/:id/complete\npublica SQS EXECUTION_COMPLETED
+    IN_REPAIR --> FAILED : PATCH /executions/:id/fail\npublica SQS EXECUTION_FAILED
+
+    COMPLETED --> [*]
+    FAILED --> [*]
 ```
+
+> **Importante:** Use sempre `PATCH /executions/:id/complete` para concluir uma execução.
+> `PATCH /executions/:id/status` com `COMPLETED` apenas atualiza o banco, **sem publicar o evento SQS**.
+
+---
 
 ## Stack
 
 | Camada | Tecnologia |
 |---|---|
-| Linguagem | Go 1.25 |
-| HTTP | Gin |
-| ORM | GORM + gormigrate |
-| SQL | PostgreSQL 15 |
-| NoSQL | AWS DynamoDB |
-| Mensageria | AWS SQS |
-| Infra | Terraform |
-| Container | Docker / docker-compose |
-| Orquestração | Kubernetes (EKS) |
-| CI/CD | GitHub Actions + GHCR |
+| Linguagem | Go 1.22+ |
+| Framework HTTP | Gin |
+| ORM | GORM + go-gormigrate |
+| Banco relacional | PostgreSQL 15 (histórico) |
+| Banco chave-valor | AWS DynamoDB (estado em tempo real) |
+| Mensageria | AWS SQS (LocalStack em dev) |
+| Testes | testify + mock |
+| Infra | Docker / Docker Compose |
 
-## Como rodar localmente
+---
+
+## Estrutura de Diretórios
+
+```
+src/
+├── cmd/api/              # Entrypoint — main.go
+├── adapter/
+│   ├── controllers/      # Handlers HTTP (Gin)
+│   ├── service/          # Use Cases + SQS Publisher
+│   └── model/            # DTOs de request/response
+├── application/port/     # Interfaces (Ports)
+├── domain/               # Entidade Execution + estados
+├── infrastructure/
+│   ├── output/           # Repositórios PostgreSQL + DynamoDB
+│   └── persistence/      # Entidades GORM
+└── config/
+    ├── db/postgres/migrations/
+    └── security/
+```
+
+---
+
+## Variáveis de Ambiente
+
+Crie o arquivo `src/.env`:
+
+```env
+# PostgreSQL
+DATABASE_DSN=host=localhost port=5433 user=postgres password=postgres dbname=mechmanager_execution sslmode=disable
+
+# AWS / LocalStack
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=test
+AWS_SECRET_ACCESS_KEY=test
+AWS_ENDPOINT_URL=http://localhost:4566
+
+# DynamoDB
+DYNAMO_EXECUTION_TABLE=executions
+
+# Filas SQS
+SQS_EXECUTION_QUEUE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/execution-queue
+SQS_EXECUTION_COMPLETE_URL=http://sqs.us-east-1.localhost.localstack.cloud:4566/000000000000/execution-complete
+
+# App
+APP_PORT=8081
+GIN_MODE=debug
+```
+
+---
+
+## Como Rodar Localmente
 
 ### Pré-requisitos
 
 - Go 1.22+
-- Docker Desktop
-- Credenciais AWS válidas (AWS Academy)
+- Infraestrutura rodando ([mechmanager-docs](https://github.com/mechmanager/mechmanager-docs))
 
-### 1. Configure o `.env`
+### 1. Subir infraestrutura
 
 ```bash
-cp src/.env.example src/.env
-# Edite com suas credenciais AWS e dados do banco
+# No repositório mechmanager-docs
+docker compose -f docker-compose.infra.yml up -d
 ```
 
-Variáveis necessárias:
-
-```env
-DATABASE_DSN=host=localhost port=5433 user=postgres password=postgres dbname=mechmanager_execution sslmode=disable
-POSTGRES_USER=postgres
-POSTGRES_PASSWORD=postgres
-POSTGRES_DB=mechmanager_execution
-
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=...
-AWS_SECRET_ACCESS_KEY=...
-AWS_SESSION_TOKEN=...
-
-DYNAMO_EXECUTION_TABLE=execution-queue
-SQS_EXECUTION_QUEUE_URL=https://sqs.us-east-1.amazonaws.com/<account-id>/execution-queue
-SQS_EXECUTION_COMPLETE_URL=https://sqs.us-east-1.amazonaws.com/<account-id>/execution-complete
-
-GIN_MODE=debug
-CORS_ALLOW_ORIGINS=http://localhost,http://localhost:3000
-```
-
-### 2. Suba o banco e a aplicação
+### 2. Iniciar o serviço
 
 ```bash
 cd src
-
-# Inicia o PostgreSQL
-docker compose up db -d
-
-# Inicia o serviço (migrations rodam automaticamente)
-go run ./cmd/api
+go run ./cmd/api/
 ```
+
+**Saída esperada:**
+```
+PostgreSQL migrations ran successfully
+[GIN-debug] Listening and serving HTTP on :8081
+[SQS] Aguardando mensagens em: .../execution-queue
+```
+
+### 3. Verificar
+
+```bash
+curl http://localhost:8081/health
+# {"service":"mechmanager-execution","status":"ok"}
+```
+
+---
 
 ## Endpoints
 
-### Health check
-
-```
-GET /health
-```
-
-### Execuções
-
-| Método | Rota | Descrição |
+| Método | Endpoint | Descrição |
 |---|---|---|
-| `GET` | `/executions` | Lista todas as execuções |
-| `GET` | `/executions/:id` | Busca execução por ID |
-| `GET` | `/executions/order/:id` | Busca execução por Order ID |
-| `PATCH` | `/executions/:id/status` | Avança o status (QUEUED→IN_DIAGNOSIS→IN_REPAIR) |
-| `PATCH` | `/executions/:id/complete` | Conclui a execução (IN_REPAIR→COMPLETED) |
-| `PATCH` | `/executions/:id/fail` | Registra falha e aciona compensação Saga |
+| `GET` | `/health` | Health check |
+| `GET` | `/executions/:id` | Buscar execução por ID |
+| `GET` | `/executions/order/:id` | Buscar execução por Order ID |
+| `PATCH` | `/executions/:id/status` | Avançar status (sem evento SQS) |
+| `PATCH` | `/executions/:id/complete` | **Concluir — publica `EXECUTION_COMPLETED`** |
+| `PATCH` | `/executions/:id/fail` | Registrar falha — publica `EXECUTION_FAILED` |
 
-### Exemplos
+### Exemplos de uso
 
-**Avançar status:**
+**Avançar para IN_DIAGNOSIS:**
 ```bash
-curl -X PATCH http://localhost:8080/executions/{id}/status \
+curl -s -X PATCH http://localhost:8081/executions/{id}/status \
   -H "Content-Type: application/json" \
-  -d '{"status":"IN_DIAGNOSIS","diagnostic_notes":"Motor com barulho anormal"}'
+  -d '{"status": "IN_DIAGNOSIS", "diagnostic_notes": "Motor com desgaste nas velas"}'
 ```
 
-**Concluir execução:**
+**Avançar para IN_REPAIR:**
 ```bash
-curl -X PATCH http://localhost:8080/executions/{id}/complete \
+curl -s -X PATCH http://localhost:8081/executions/{id}/status \
   -H "Content-Type: application/json" \
-  -d '{"repair_notes":"Correia dentada substituída com sucesso"}'
+  -d '{"status": "IN_REPAIR", "repair_notes": "Iniciando substituicao das velas"}'
 ```
 
-**Registrar falha (Saga rollback):**
+**Concluir execução (dispara Saga):**
 ```bash
-curl -X PATCH http://localhost:8080/executions/{id}/fail \
+curl -s -X PATCH http://localhost:8081/executions/{id}/complete \
   -H "Content-Type: application/json" \
-  -d '{"reason":"Peça de reposição indisponível"}'
+  -d '{"repair_notes": "Troca de oleo e velas concluida. Veiculo pronto para entrega."}'
 ```
 
-## Infraestrutura (Terraform)
-
+**Registrar falha (Saga Rollback):**
 ```bash
-cd terraform
-
-# Inicializar e provisionar
-terraform init
-terraform apply
-
-# Outputs: SQS URLs, DynamoDB table name, RDS endpoint
-terraform output
+curl -s -X PATCH http://localhost:8081/executions/{id}/fail \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "Peca de reposicao indisponivel no estoque"}'
 ```
 
-Recursos provisionados:
-- SQS `execution-queue` + DLQ
-- SQS `execution-complete` + DLQ
-- DynamoDB `execution-queue` (com GSI por status)
-- RDS PostgreSQL `mechmanager_execution`
+---
+
+## Formato dos Eventos SQS
+
+### Produzido em `execution-complete`
+
+```json
+// Sucesso
+{
+  "event": "EXECUTION_COMPLETED",
+  "order_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "execution_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+}
+
+// Falha (aciona Saga Rollback no OS Service)
+{
+  "event": "EXECUTION_FAILED",
+  "order_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "execution_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "reason": "Motivo da falha"
+}
+```
+
+### Consumido de `execution-queue`
+
+```json
+{
+  "order_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "mechanic_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+}
+```
+
+---
 
 ## Testes
 
@@ -165,19 +272,17 @@ cd src
 go test ./...
 ```
 
-## CI/CD
+Com cobertura:
 
-O pipeline GitHub Actions executa em todo push:
+```bash
+cd src
+go test ./... -coverprofile=coverage.out
+go tool cover -func=coverage.out | grep total
+```
 
-1. `gofmt` — formatação
-2. `go vet` — análise estática
-3. `go test ./...` — testes unitários
-4. Build e push da imagem Docker para GHCR
-5. Deploy no EKS com rollback automático em caso de falha
+---
 
-## Comunicação entre serviços
+## Documentação Completa
 
-| Direção | Fila | Evento |
-|---|---|---|
-| OS Service → Execution | `execution-queue` | OS aceita |
-| Execution → OS Service | `execution-complete` | `EXECUTION_COMPLETED` ou `EXECUTION_FAILED` |
+Para o roteiro de demo com todos os comandos curl:
+[→ mechmanager-docs/DEMO.md](https://github.com/mechmanager/mechmanager-docs/blob/main/DEMO.md)
