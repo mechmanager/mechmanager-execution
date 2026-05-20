@@ -26,3 +26,6 @@ data:
   SQS_EXECUTION_COMPLETE_URL: https://sqs.us-east-1.amazonaws.com/975050103410/execution-complete
 
   CORS_ALLOW_ORIGINS: "http://localhost,http://localhost:3000"
+
+  NEW_RELIC_APP_NAME: mechmanager-execution
+  NEW_RELIC_LICENSE_KEY: "7a9a4bcf25026be63ca7d2f0dc7d2f448bf7NRAL"
