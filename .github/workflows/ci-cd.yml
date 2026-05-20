@@ -30,6 +30,9 @@ jobs:
       checks: write
       pull-requests: write
 
+    outputs:
+      image_tag: ${{ steps.build.outputs.image_tag }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,7 +59,6 @@ jobs:
             echo "Coverage below 80%! Failing build."
             exit 1
           fi
-          # Ajusta os caminhos do módulo para o caminho relativo ao repo (src/) — para SonarCloud
           sed -i 's#^mechmanager-execution/#src/#' coverage.out
 
       - name: Upload coverage report
@@ -80,6 +82,17 @@ jobs:
             -Dsonar.exclusions=**/vendor/**,**/features/**
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Build & Push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./src
+          file: ./src/docker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }}
+            ${{ env.IMAGE_NAME }}:latest
+
 
   cd:
     name: CD - Deploy to Kubernetes (EKS)
