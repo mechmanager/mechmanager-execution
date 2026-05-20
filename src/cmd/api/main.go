@@ -61,7 +61,7 @@ func main() {
 	migrations.RunMigrations(db)
 
 	// Gin
-	r := security.NewGinEngine()
+	r := security.NewGinEngine(nil)
 
 	// Repositories
 	pgRepo := infraOutput.NewExecutionPostgresRepository(db)
