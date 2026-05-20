@@ -44,8 +44,6 @@ jobs:
         working-directory: ./src
         run: |
           go test -coverprofile=coverage.out ./adapter/service
-          # Ajusta os caminhos para incluir 'src/' no início
-          sed -i 's#^adapter/#src/adapter/#' coverage.out
           go tool cover -func=coverage.out
           go tool cover -html=coverage.out -o coverage.html
 
@@ -58,6 +56,8 @@ jobs:
             echo "Coverage below 80%! Failing build."
             exit 1
           fi
+          # Ajusta os caminhos do módulo para o caminho relativo ao repo (src/) — para SonarCloud
+          sed -i 's#^mechmanager-execution/#src/#' coverage.out
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4

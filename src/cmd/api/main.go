@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
+	newrelic "github.com/newrelic/go-agent/v3/newrelic"
 
 	controllers "mechmanager-execution/adapter/controllers"
 	usecase "mechmanager-execution/adapter/service"
@@ -35,6 +37,21 @@ func main() {
 
 	ctx := context.Background()
 
+	nrApp, err := newrelic.NewApplication(
+		newrelic.ConfigAppName(func() string {
+			if v := os.Getenv("NEW_RELIC_APP_NAME"); v != "" {
+				return v
+			}
+			return "mechmanager-execution"
+		}()),
+		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
+		newrelic.ConfigDistributedTracerEnabled(true),
+	)
+	if err != nil {
+		log.Printf("New Relic init: %v", err)
+		nrApp = nil
+	}
+
 	// AWS Config
 	cfg, err := awscfg.LoadDefaultConfig(ctx, awscfg.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
@@ -48,14 +65,14 @@ func main() {
 	migrations.RunMigrations(db)
 
 	// Gin
-	r := security.NewGinEngine()
+	r := security.NewGinEngine(nrApp)
 
 	// Repositories
 	pgRepo := infraOutput.NewExecutionPostgresRepository(db)
 	dynamoRepo := infraOutput.NewExecutionDynamoRepository(ddbClient)
 
 	// SQS Sender
-	sender := usecase.NewSQSSender(sqsClient)
+	sender := usecase.NewSQSSender(sqsClient, nrApp)
 
 	// Use Case
 	executionUseCase := usecase.NewExecutionAdapter(pgRepo, dynamoRepo, sender)
@@ -87,15 +104,37 @@ func main() {
 				continue
 			}
 			for _, msg := range messages {
+				var txn *newrelic.Transaction
+				if nrApp != nil {
+					txn = nrApp.StartTransaction("SQS/Consume/execution-queue")
+					hdrs := http.Header{}
+					for k, v := range msg.MessageAttributes {
+						if v.StringValue != nil {
+							hdrs.Set(k, *v.StringValue)
+						}
+					}
+					txn.AcceptDistributedTraceHeaders(newrelic.TransportQueue, hdrs)
+				}
 				var orderMsg OrderMessage
 				if err := json.Unmarshal([]byte(*msg.Body), &orderMsg); err != nil {
 					log.Printf("[SQS] Erro ao desserializar mensagem: %v", err)
+					if txn != nil {
+						txn.NoticeError(err)
+						txn.End()
+					}
 					continue
 				}
 				log.Printf("[SQS] OS recebida para execução: %s", orderMsg.OrderID)
 				if _, err := executionUseCase.CreateFromOrder(orderMsg.OrderID, orderMsg.MechanicID); err != nil {
 					log.Printf("[SQS] Erro ao criar execução para OS %s: %v", orderMsg.OrderID, err)
+					if txn != nil {
+						txn.NoticeError(err)
+						txn.End()
+					}
 					continue
+				}
+				if txn != nil {
+					txn.End()
 				}
 				if err := sender.Delete(ctx, executionQueueURL, msg.ReceiptHandle); err != nil {
 					log.Printf("[SQS] Erro ao deletar mensagem da fila: %v", err)
@@ -104,6 +143,10 @@ func main() {
 		}
 	}()
 
-	log.Println("mechmanager-execution iniciado na porta :8080")
-	r.Run(":8080")
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	log.Printf("mechmanager-execution iniciado na porta :%s", port)
+	r.Run(":" + port)
 }
