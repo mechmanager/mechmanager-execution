@@ -67,6 +67,7 @@ func (m *mockRepo) Update(e *domain.Execution) (*domain.Execution, error) {
 // mockDynamo simula o repositório DynamoDB
 type mockDynamo struct {
 	enqueueErr error
+	updateErr  error
 	removeErr  error
 	enqueued   []string
 	removed    []string
@@ -81,6 +82,9 @@ func (m *mockDynamo) Enqueue(e *domain.Execution) error {
 }
 
 func (m *mockDynamo) UpdateQueueStatus(orderID string, status domain.ExecutionStatus) error {
+	if m.updateErr != nil {
+		return m.updateErr
+	}
 	return nil
 }
 
@@ -100,20 +104,21 @@ func (m *mockDynamo) Remove(orderID string) error {
 type mockMessenger struct {
 	completeEvents []string
 	failedEvents   []string
-	sendErr        error
+	completeErr    error
+	failedErr      error
 }
 
 func (m *mockMessenger) SendExecutionComplete(e *domain.Execution) error {
-	if m.sendErr != nil {
-		return m.sendErr
+	if m.completeErr != nil {
+		return m.completeErr
 	}
 	m.completeEvents = append(m.completeEvents, e.OrderID)
 	return nil
 }
 
 func (m *mockMessenger) SendExecutionFailed(e *domain.Execution, reason string) error {
-	if m.sendErr != nil {
-		return m.sendErr
+	if m.failedErr != nil {
+		return m.failedErr
 	}
 	m.failedEvents = append(m.failedEvents, e.OrderID)
 	return nil
