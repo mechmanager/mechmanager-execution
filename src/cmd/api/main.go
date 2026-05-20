@@ -4,16 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"log"
-	"net/http"
 	"os"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awscfg "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
-	newrelic "github.com/newrelic/go-agent/v3/newrelic"
 
 	controllers "mechmanager-execution/adapter/controllers"
 	usecase "mechmanager-execution/adapter/service"
@@ -37,42 +36,39 @@ func main() {
 
 	ctx := context.Background()
 
-	nrApp, err := newrelic.NewApplication(
-		newrelic.ConfigAppName(func() string {
-			if v := os.Getenv("NEW_RELIC_APP_NAME"); v != "" {
-				return v
-			}
-			return "mechmanager-execution"
-		}()),
-		newrelic.ConfigLicense(os.Getenv("NEW_RELIC_LICENSE_KEY")),
-		newrelic.ConfigDistributedTracerEnabled(true),
-	)
-	if err != nil {
-		log.Printf("New Relic init: %v", err)
-		nrApp = nil
-	}
-
 	// AWS Config
 	cfg, err := awscfg.LoadDefaultConfig(ctx, awscfg.WithRegion(os.Getenv("AWS_REGION")))
 	if err != nil {
 		log.Fatalf("aws config: %v", err)
 	}
-	sqsClient := sqs.NewFromConfig(cfg)
-	ddbClient := dynamodb.NewFromConfig(cfg)
+	var sqsClient *sqs.Client
+	var ddbClient *dynamodb.Client
+	endpoint := os.Getenv("AWS_ENDPOINT_URL")
+	if endpoint != "" {
+		sqsClient = sqs.NewFromConfig(cfg, func(o *sqs.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+		})
+		ddbClient = dynamodb.NewFromConfig(cfg, func(o *dynamodb.Options) {
+			o.BaseEndpoint = aws.String(endpoint)
+		})
+	} else {
+		sqsClient = sqs.NewFromConfig(cfg)
+		ddbClient = dynamodb.NewFromConfig(cfg)
+	}
 
 	// PostgreSQL
 	db := postgres.StartPostgresDBConnection()
 	migrations.RunMigrations(db)
 
 	// Gin
-	r := security.NewGinEngine(nrApp)
+	r := security.NewGinEngine()
 
 	// Repositories
 	pgRepo := infraOutput.NewExecutionPostgresRepository(db)
 	dynamoRepo := infraOutput.NewExecutionDynamoRepository(ddbClient)
 
 	// SQS Sender
-	sender := usecase.NewSQSSender(sqsClient, nrApp)
+	sender := usecase.NewSQSSender(sqsClient)
 
 	// Use Case
 	executionUseCase := usecase.NewExecutionAdapter(pgRepo, dynamoRepo, sender)
@@ -104,37 +100,15 @@ func main() {
 				continue
 			}
 			for _, msg := range messages {
-				var txn *newrelic.Transaction
-				if nrApp != nil {
-					txn = nrApp.StartTransaction("SQS/Consume/execution-queue")
-					hdrs := http.Header{}
-					for k, v := range msg.MessageAttributes {
-						if v.StringValue != nil {
-							hdrs.Set(k, *v.StringValue)
-						}
-					}
-					txn.AcceptDistributedTraceHeaders(newrelic.TransportQueue, hdrs)
-				}
 				var orderMsg OrderMessage
 				if err := json.Unmarshal([]byte(*msg.Body), &orderMsg); err != nil {
 					log.Printf("[SQS] Erro ao desserializar mensagem: %v", err)
-					if txn != nil {
-						txn.NoticeError(err)
-						txn.End()
-					}
 					continue
 				}
 				log.Printf("[SQS] OS recebida para execução: %s", orderMsg.OrderID)
 				if _, err := executionUseCase.CreateFromOrder(orderMsg.OrderID, orderMsg.MechanicID); err != nil {
 					log.Printf("[SQS] Erro ao criar execução para OS %s: %v", orderMsg.OrderID, err)
-					if txn != nil {
-						txn.NoticeError(err)
-						txn.End()
-					}
 					continue
-				}
-				if txn != nil {
-					txn.End()
 				}
 				if err := sender.Delete(ctx, executionQueueURL, msg.ReceiptHandle); err != nil {
 					log.Printf("[SQS] Erro ao deletar mensagem da fila: %v", err)
@@ -143,9 +117,9 @@ func main() {
 		}
 	}()
 
-	port := os.Getenv("PORT")
+	port := os.Getenv("APP_PORT")
 	if port == "" {
-		port = "8080"
+		port = "8081"
 	}
 	log.Printf("mechmanager-execution iniciado na porta :%s", port)
 	r.Run(":" + port)
