@@ -57,6 +57,26 @@ func TestCreateFromOrder_RepoError(t *testing.T) {
 	}
 }
 
+func TestCreateFromOrder_AlreadyExists(t *testing.T) {
+	adapter, _, dynamo, _ := newAdapter()
+
+	first, err := adapter.CreateFromOrder("order-dup", "mec-001")
+	if err != nil {
+		t.Fatalf("primeira criação falhou: %v", err)
+	}
+
+	second, err := adapter.CreateFromOrder("order-dup", "mec-001")
+	if err != nil {
+		t.Fatalf("esperado sem erro para mensagem duplicada, got: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Error("esperado retornar a mesma execução, não criar uma nova")
+	}
+	if len(dynamo.enqueued) != 1 {
+		t.Errorf("esperado 1 enqueue (não 2), got: %d", len(dynamo.enqueued))
+	}
+}
+
 // --- UpdateStatus (Saga transitions) ---
 
 func TestUpdateStatus_QueuedToInDiagnosis(t *testing.T) {

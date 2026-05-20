@@ -32,6 +32,10 @@ func (a *ExecutionAdapter) CreateFromOrder(orderID, mechanicID string) (*domain.
 	if orderID == "" {
 		return nil, errors.New("order_id é obrigatório")
 	}
+	if existing, err := a.repo.FindByOrderID(orderID); err == nil && existing != nil {
+		log.Printf("[EXECUTION][WARN] OS %s já possui execução (status: %s) — mensagem duplicada descartada", orderID, existing.Status)
+		return existing, nil
+	}
 	now := time.Now()
 	execution := &domain.Execution{
 		ID:         uuid.New(),
