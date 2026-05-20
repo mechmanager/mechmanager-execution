@@ -31,7 +31,7 @@ jobs:
       pull-requests: write
 
     outputs:
-      image_tag: ${{ steps.build.outputs.image_tag }}
+      image_tag: ${{ steps.tag.outputs.value }}
 
     steps:
       - name: Checkout
@@ -83,6 +83,17 @@ jobs:
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Generate image tag (short SHA)
+        id: tag
+        run: echo "value=${GITHUB_SHA::7}" >> $GITHUB_OUTPUT
+
       - name: Build & Push Docker image
         uses: docker/build-push-action@v6
         with:
@@ -92,7 +103,6 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ steps.tag.outputs.value }}
             ${{ env.IMAGE_NAME }}:latest
-
 
   cd:
     name: CD - Deploy to Kubernetes (EKS)
